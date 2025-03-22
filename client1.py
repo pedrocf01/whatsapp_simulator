@@ -7,6 +7,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 HOST = '127.0.0.1'
 PORT = 12345
+FETCH_INTERVAL = 5  # seconds between automatic fetches
 
 def listen_server(sock):
     """Continuously listen for messages from the server and print them."""
@@ -27,8 +28,19 @@ def listen_server(sock):
                 elif msg['type'] == 'message':
                     print(f"\nNew message from {msg['from']}: {msg['content']}")
         except Exception as e:
-            print("Error:", e)
+            print("Error receiving data:", e)
             break
+
+def auto_fetch(sock):
+    """Automatically send fetch requests to the server at regular intervals."""
+    while True:
+        try:
+            fetch_msg = {"type": "fetch"}
+            sock.sendall((json.dumps(fetch_msg) + "\n").encode())
+        except Exception as e:
+            print("Auto-fetch error:", e)
+            break
+        time.sleep(FETCH_INTERVAL)
 
 def main():
     session = PromptSession()
@@ -44,15 +56,17 @@ def main():
     login = {"type": "login", "username": username}
     sock.sendall((json.dumps(login) + "\n").encode())
 
-    # Start a background thread to listen for server messages
+    # Start the background threads for listening and auto-fetching
     listener = threading.Thread(target=listen_server, args=(sock,), daemon=True)
     listener.start()
+    fetcher = threading.Thread(target=auto_fetch, args=(sock,), daemon=True)
+    fetcher.start()
 
-    # Main loop: get user commands
+    # Main loop: handle user commands (send or quit)
     with patch_stdout():
         while True:
             try:
-                command = session.prompt("\nEnter command (send/fetch/quit): ").strip()
+                command = session.prompt("\nEnter command (send/quit): ").strip()
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -73,12 +87,8 @@ def main():
                     print("Message sent, status: not yet delivered (pending server ack)")
                 except Exception as e:
                     print("Failed to send message:", e)
-            elif command == "fetch":
-                fetch_msg = {"type": "fetch"}
-                try:
-                    sock.sendall((json.dumps(fetch_msg) + "\n").encode())
-                except Exception as e:
-                    print("Failed to fetch messages:", e)
+            else:
+                print("Unknown command. Use 'send' or 'quit'.")
     sock.close()
 
 if __name__ == '__main__':
