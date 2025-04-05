@@ -5,115 +5,135 @@ import json
 HOST = '127.0.0.1'
 PORT = 12345
 
-# Global dictionaries to track online clients and pending messages
-clients = {}         # username -> socket
-message_queues = {}  # username -> list of messages
+# Dicionários globais para rastrear clientes online e mensagens pendentes
+clientes = {}         # nome de usuário -> socket
+filas_mensagem = {}   # nome de usuário -> lista de mensagens
 lock = threading.Lock()
-message_id_counter = 0
+
+def login(conn, msg, addr):
+    """Processa a mensagem de login, registra o usuário e inicializa sua fila."""
+    username = msg.get('username')
+    with lock:
+        clientes[username] = conn
+        if username not in filas_mensagem:
+            filas_mensagem[username] = []
+    print(f"{username} fez login a partir de {addr}")
+    return username
+
+def send(conn, msg):
+    """Processa o envio de mensagens, confirma recebimento e tenta entrega imediata."""
+    msg_id = msg.get('id')
+    destinatario = msg.get('to')
+    
+    # Confirma para o remetente que o servidor recebeu a mensagem.
+    ack = {"tipo": "status", "id": msg_id, "status": "✓"}
+    conn.sendall((json.dumps(ack) + "\n").encode())
+
+    # Armazena a mensagem na fila do destinatário.
+    with lock:
+        if destinatario not in filas_mensagem:
+            filas_mensagem[destinatario] = []
+        filas_mensagem[destinatario].append(msg)
+
+    # Tenta entregar imediatamente se o destinatário estiver online.
+    with lock:
+        if destinatario in clientes:
+            try:
+                delivery_msg = {
+                    "tipo": "mensagem",
+                    "from": msg.get("from"),
+                    "conteudo": msg.get("conteudo"),
+                    "timestamp": msg.get("timestamp"),
+                    "id": msg_id
+                }
+                clientes[destinatario].sendall((json.dumps(delivery_msg) + "\n").encode())
+                # Notifica o remetente que a mensagem foi entregue.
+                entregue = {"tipo": "status", "id": msg_id, "status": "✓✓"}
+                conn.sendall((json.dumps(entregue) + "\n").encode())
+                # Remove a mensagem da fila do destinatário.
+                filas_mensagem[destinatario] = [
+                    m for m in filas_mensagem[destinatario] if m.get("id") != msg_id
+                ]
+            except Exception as e:
+                print("Erro ao entregar ao destinatário:", e)
+
+def fetch(conn, username):
+    """Processa a requisição de fetch do cliente, enviando mensagens pendentes."""
+    if not username:
+        return
+
+    with lock:
+        mensagens = filas_mensagem.get(username, [])
+        filas_mensagem[username] = []  # Limpa a fila após a busca
+
+    for m in mensagens:
+        try:
+            delivery_msg = {
+                "tipo": "mensagem",
+                "from": m.get("from"),
+                "conteudo": m.get("conteudo"),
+                "timestamp": m.get("timestamp"),
+                "id": m.get("id")
+            }
+            conn.sendall((json.dumps(delivery_msg) + "\n").encode())
+            # Notifica o remetente que a mensagem foi entregue.
+            remetente = m.get("from")
+            if remetente in clientes:
+                status_update = {"tipo": "status", "id": m.get("id"), "status": "✓✓"}
+                clientes[remetente].sendall((json.dumps(status_update) + "\n").encode())
+        except Exception as e:
+            print("Erro ao enviar mensagem pendente:", e)
+            with lock:
+                filas_mensagem[username].append(m)
+
+def cleanup_client(username):
+    global clientes
+    if username:
+        with lock:
+            if username in clientes:
+                del clientes[username]
+                print(f"{username} saiu do chat.")
 
 def handle_client(conn, addr):
-    global message_id_counter
     username = None
     try:
         while True:
             data = conn.recv(1024)
             if not data:
                 break
-            # Process each JSON message (one per line)
+
+            # Processa cada linha de dados (cada linha corresponde a uma mensagem JSON)
             for line in data.decode().splitlines():
                 try:
                     msg = json.loads(line)
                 except Exception as e:
-                    print("Error decoding message:", e)
+                    print("Erro ao decodificar a mensagem:", e)
                     continue
 
-                if msg['type'] == 'login':
-                    username = msg['username']
-                    with lock:
-                        clients[username] = conn
-                        if username not in message_queues:
-                            message_queues[username] = []
-                    print(f"{username} logged in from {addr}")
+                tipo = msg.get('tipo')
+                if tipo == 'login':
+                    username = login(conn, msg, addr)
+                elif tipo == 'send':
+                    send(conn, msg)
+                elif tipo == 'fetch':
+                    fetch(conn, username)
+                elif tipo == "logout":
+                    username = msg.get("username")
+                    cleanup_client(username)   
+                else:
+                    print("Tipo de mensagem desconhecido:", tipo)
 
-                elif msg['type'] == 'send':
-                    # Assign a unique id to the message
-                    with lock:
-                        message_id_counter += 1
-                        msg_id = message_id_counter
-                    msg['id'] = msg_id
-                    recipient = msg['to']
-
-                    # Acknowledge to sender that the message has been received by the server.
-                    ack = {"type": "status", "id": msg_id, "status": "server"}
-                    conn.sendall((json.dumps(ack) + "\n").encode())
-
-                    # Store message in recipient's queue
-                    with lock:
-                        if recipient not in message_queues:
-                            message_queues[recipient] = []
-                        message_queues[recipient].append(msg)
-
-                    # If the recipient is online, try to deliver immediately.
-                    with lock:
-                        if recipient in clients:
-                            try:
-                                clients[recipient].sendall(
-                                    (json.dumps({
-                                        "type": "message",
-                                        "from": msg["from"],
-                                        "content": msg["content"],
-                                        "id": msg_id
-                                    }) + "\n").encode()
-                                )
-                                # Notify the sender that the message was delivered.
-                                delivered = {"type": "status", "id": msg_id, "status": "delivered"}
-                                conn.sendall((json.dumps(delivered) + "\n").encode())
-                                # Remove the message from the queue now that it has been sent.
-                                message_queues[recipient] = [
-                                    m for m in message_queues[recipient] if m["id"] != msg_id
-                                ]
-                            except Exception as e:
-                                print("Error delivering to recipient:", e)
-
-                elif msg['type'] == 'fetch':
-                    # Client requests any pending messages
-                    with lock:
-                        queue = message_queues.get(username, [])
-                        message_queues[username] = []  # clear the queue after fetching
-                    for m in queue:
-                        try:
-                            conn.sendall(
-                                (json.dumps({
-                                    "type": "message",
-                                    "from": m["from"],
-                                    "content": m["content"],
-                                    "id": m["id"]
-                                }) + "\n").encode()
-                            )
-                            # Notify the sender that the message has been delivered.
-                            sender = m["from"]
-                            if sender in clients:
-                                status_update = {"type": "status", "id": m["id"], "status": "delivered"}
-                                clients[sender].sendall((json.dumps(status_update) + "\n").encode())
-                        except Exception as e:
-                            # If sending fails, re-queue the message.
-                            with lock:
-                                message_queues[username].append(m)
     except Exception as e:
-        print("Exception:", e)
+        print("Exceção:", e)
     finally:
-        if username:
-            with lock:
-                if username in clients:
-                    del clients[username]
+        cleanup_client(username)
         conn.close()
-        print(f"{username} disconnected.")
 
 def main():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((HOST, PORT))
     server_socket.listen()
-    print("Server listening on", HOST, PORT)
+    print("Servidor ouvindo em", HOST, PORT)
     while True:
         conn, addr = server_socket.accept()
         thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)

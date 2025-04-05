@@ -1,21 +1,26 @@
 import socket
 import threading
 import json
+import datetime
 import time
+import uuid
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
 HOST = '127.0.0.1'
 PORT = 12345
-FETCH_INTERVAL = 5  # seconds between automatic fetches
+INTERVALO_FETCH = 2  # segundos entre fetches automáticos
+
+# Dicionário para armazenar mensagens enviadas com seus status
+msg_enviadas = {}
 
 def listen_server(sock):
-    """Continuously listen for messages from the server and print them."""
+    """Escuta continuamente mensagens do servidor e atualiza o status interno das mensagens enviadas."""
     while True:
         try:
             data = sock.recv(1024)
             if not data:
-                print("Disconnected from server.")
+                print("Desconectado do servidor.")
                 break
             for line in data.decode().splitlines():
                 try:
@@ -23,24 +28,75 @@ def listen_server(sock):
                 except Exception:
                     continue
 
-                if msg['type'] == 'status':
-                    print(f"Status update for message {msg['id']}: {msg['status']}")
-                elif msg['type'] == 'message':
-                    print(f"\nNew message from {msg['from']}: {msg['content']}")
-        except Exception as e:
-            print("Error receiving data:", e)
-            break
+                if msg['tipo'] == 'status':
+                    msg_id = msg.get('id')
+                    if msg_id and msg_id in msg_enviadas:
+                        # Atualiza o status da mensagem enviada
+                        msg_enviadas[msg_id]['status'] = msg.get('status')
+                        print(f"Atualização de status da mensagem {msg_id}: {msg.get('status')}")
+                    else:
+                        print(f"Status recebido para mensagem desconhecida: {msg.get('status')}")
+                elif msg['tipo'] == 'mensagem':
+                    print(f"\n{msg['from'].capitalize()}: {msg['conteudo']} - {msg['timestamp']}")
+        except OSError as e:
+            # Trata a exceção de forma silenciosa se o socket já estiver fechado
+            if e.errno == 10053:
+                break
+            else:
+                print("Erro ao receber dados:", e)
+                break
 
 def auto_fetch(sock):
-    """Automatically send fetch requests to the server at regular intervals."""
+    """Envia automaticamente solicitações de busca ao servidor em intervalos regulares."""
     while True:
         try:
-            fetch_msg = {"type": "fetch"}
+            fetch_msg = {"tipo": "fetch"}
             sock.sendall((json.dumps(fetch_msg) + "\n").encode())
         except Exception as e:
-            print("Auto-fetch error:", e)
+            print("Erro na busca automática:", e)
             break
-        time.sleep(FETCH_INTERVAL)
+        time.sleep(INTERVALO_FETCH)
+
+def processar_comandos(sock, username, session):
+    """Processa comandos digitado pelo usuário."""
+    while True:
+            try:
+                comando = session.prompt("\n(send/quit): ").strip()
+            except KeyboardInterrupt:
+                continue
+            except EOFError:
+                break
+
+            if comando == "quit":
+                logout = {"tipo": "logout", "username": username}
+                sock.sendall((json.dumps(logout) + "\n").encode())
+                sock.shutdown(socket.SHUT_RDWR)
+                break
+            elif comando.startswith("send"):
+                partes = comando.split(" ", 2)
+                if len(partes) < 3:
+                    print("Uso: send <destinatário> <mensagem>")
+                    continue
+                destinatario = partes[1]
+                conteudo = partes[2]
+                timestamp = datetime.datetime.now().strftime("%H:%M")
+                # Gera um ID único para a mensagem
+                msg_id = str(uuid.uuid4())
+                mensagem = {"tipo": "send", "id": msg_id, "from": username, "to": destinatario, "conteudo": conteudo, 'timestamp': timestamp}
+                try:
+                    sock.sendall((json.dumps(mensagem) + "\n").encode())
+                    # Armazena a mensagem com status inicial "pendente"
+                    msg_enviadas[msg_id] = {
+                        "to": destinatario,
+                        "conteudo": conteudo,
+                        "status": "pendente",
+                        "timestamp": time.time()
+                    }
+                    print(f"⧖")
+                except Exception as e:
+                    print("Falha ao enviar mensagem:", e)
+            else:
+                print("Comando desconhecido. Use 'send' ou 'quit'.")
 
 def main():
     session = PromptSession()
@@ -48,47 +104,23 @@ def main():
     try:
         sock.connect((HOST, PORT))
     except Exception as e:
-        print("Unable to connect to server:", e)
+        print("Não foi possível conectar ao servidor:", e)
         return
 
-    # Prompt for username
-    username = session.prompt("Enter your username: ").strip()
-    login = {"type": "login", "username": username}
+    # Solicita o nome de usuário
+    username = session.prompt("Digite seu nome de usuário: ").strip()
+    login = {"tipo": "login", "username": username}
     sock.sendall((json.dumps(login) + "\n").encode())
 
-    # Start the background threads for listening and auto-fetching
+    # Inicia as threads para escuta e busca automática
     listener = threading.Thread(target=listen_server, args=(sock,), daemon=True)
     listener.start()
     fetcher = threading.Thread(target=auto_fetch, args=(sock,), daemon=True)
     fetcher.start()
 
-    # Main loop: handle user commands (send or quit)
+    # Loop principal: comandos do usuário (enviar ou sair)
     with patch_stdout():
-        while True:
-            try:
-                command = session.prompt("\nEnter command (send/quit): ").strip()
-            except KeyboardInterrupt:
-                continue
-            except EOFError:
-                break
-
-            if command == "quit":
-                break
-            elif command.startswith("send"):
-                parts = command.split(" ", 2)
-                if len(parts) < 3:
-                    print("Usage: send <recipient> <message>")
-                    continue
-                recipient = parts[1]
-                content = parts[2]
-                message = {"type": "send", "from": username, "to": recipient, "content": content}
-                try:
-                    sock.sendall((json.dumps(message) + "\n").encode())
-                    print("Message sent, status: not yet delivered (pending server ack)")
-                except Exception as e:
-                    print("Failed to send message:", e)
-            else:
-                print("Unknown command. Use 'send' or 'quit'.")
+        processar_comandos(sock, username, session)
     sock.close()
 
 if __name__ == '__main__':
