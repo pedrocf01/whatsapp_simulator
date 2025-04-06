@@ -119,7 +119,8 @@ def handle_client(conn, addr):
                     fetch(conn, username)
                 elif tipo == "logout":
                     username = msg.get("username")
-                    cleanup_client(username)   
+                    cleanup_client(username)
+                    username = None    
                 else:
                     print("Tipo de mensagem desconhecido:", tipo)
 
