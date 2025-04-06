@@ -14,9 +14,12 @@ INTERVALO_FETCH = 2  # segundos entre fetches automáticos
 # Dicionário para armazenar mensagens enviadas com seus status
 msg_enviadas = {}
 
+# Evento para sinalizar parada de threads
+parar_evento = threading.Event()
+
 def listen_server(sock):
-    """Escuta continuamente mensagens do servidor e atualiza o status interno das mensagens enviadas."""
-    while True:
+    """Escuta mensagens do servidor e atualiza o status interno das mensagens enviadas"""
+    while not parar_evento.is_set():
         try:
             data = sock.recv(1024)
             if not data:
@@ -39,15 +42,17 @@ def listen_server(sock):
                 elif msg['tipo'] == 'mensagem':
                     print(f"\n{msg['from'].capitalize()}: {msg['conteudo']} - {msg['timestamp']}")
         except OSError as e:
-            # Trata a exceção de forma silenciosa se o socket já estiver fechado
-            if e.errno == 10053:
+            if parar_evento.is_set():
                 break
-            else:
-                print("Erro ao receber dados:", e)
-                break
+            print("Erro ao receber dados:", e)
+            break
+        except Exception as e:
+            print("Erro na thread de escuta:", e)
+            break
 
 def auto_fetch(sock):
-    """Envia automaticamente solicitações de busca ao servidor em intervalos regulares."""
+    """Envia automaticamente solicitações de busca ao servidor no intervalo estabelecido"""
+    time.sleep(INTERVALO_FETCH)
     while True:
         try:
             fetch_msg = {"tipo": "fetch"}
@@ -55,7 +60,6 @@ def auto_fetch(sock):
         except Exception as e:
             print("Erro na busca automática:", e)
             break
-        time.sleep(INTERVALO_FETCH)
 
 def processar_comandos(sock, username, session):
     """Processa comandos digitado pelo usuário."""
@@ -70,6 +74,8 @@ def processar_comandos(sock, username, session):
             if comando == "quit":
                 logout = {"tipo": "logout", "username": username}
                 sock.sendall((json.dumps(logout) + "\n").encode())
+                parar_evento.set()  # Sinaliza para as threads pararem
+                time.sleep(1)       # Aguarda threads terminarem
                 sock.shutdown(socket.SHUT_RDWR)
                 break
             elif comando.startswith("send"):
