@@ -53,7 +53,7 @@ def listen_server(sock):
 def auto_fetch(sock):
     """Envia automaticamente solicitações de busca ao servidor no intervalo estabelecido"""
     time.sleep(INTERVALO_FETCH)
-    while True:
+    while not parar_evento.is_set():
         try:
             fetch_msg = {"tipo": "fetch"}
             sock.sendall((json.dumps(fetch_msg) + "\n").encode())

@@ -107,7 +107,6 @@ def handle_client(conn, addr):
                 try:
                     msg = json.loads(line)
                 except Exception as e:
-                    print("Erro ao decodificar a mensagem:", e)
                     continue
 
                 tipo = msg.get('tipo')
